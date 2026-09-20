@@ -18,7 +18,6 @@ import signal
 import struct
 import sys
 import termios
-import time
 import tty
 from collections.abc import Callable
 from typing import TextIO
@@ -44,10 +43,6 @@ _MAX_CSI_PARAM_COUNT = 24
 # terminal never displayed. We only note the anomaly so it is not invisible.
 _STRING_WARN_LEN = 2048
 
-# A lone escape key toggles logging; a doubled press sends a literal. The two
-# are told apart by this much silence after the first press, so a single
-# Ctrl-\ takes effect on its own instead of waiting for the next keystroke.
-_ESCAPE_TIMEOUT = 0.3
 _SELECT_TIMEOUT = 0.5
 
 
@@ -295,58 +290,25 @@ def _timestamp() -> str:
 
 
 class LogSession:
-    """Owns the active log file and stripper; supports stop/restart."""
+    """Owns the log file and stripper for one session."""
 
-    def __init__(self, path: str, log_file: TextIO,
-                 open_next: Callable[[], tuple[str, TextIO]],
+    def __init__(self, log_file: TextIO,
                  include_alt_screen: bool, out_fd: int) -> None:
-        self._open_next = open_next
-        self._include_alt_screen = include_alt_screen
         self._out_fd = out_fd
-        self.path = path
-        self._file: TextIO | None = None
-        self._stripper: VTStripper | None = None
-        self._start(log_file, path)
-
-    @property
-    def active(self) -> bool:
-        return self._file is not None
+        self._file = log_file
+        self._stripper = VTStripper(log_file.write, include_alt_screen)
+        log_file.write(f"--- log started {_timestamp()} ---\n")
 
     def feed(self, data: bytes) -> None:
-        if self._stripper is not None:
-            self._guard(self._stripper.feed, data)
-
-    def toggle(self) -> None:
-        if self.active:
-            self.stop()
-        else:
-            self.restart()
-
-    def restart(self) -> None:
-        if self.active:
-            return
-        try:
-            path, log_file = self._open_next()
-        except OSError as exc:
-            self._notice(f"cannot open log file: {exc}")
-            return
-        self._start(log_file, path)
-        self._notice(f"logging to {path}")
+        self._guard(self._stripper.feed, data)
 
     def stop(self) -> None:
-        if not self.active:
-            return
-        if self._stripper is not None:
-            self._guard(self._stripper.flush)
-        if self._file is not None:
-            try:
-                self._file.write(f"--- log ended {_timestamp()} ---\n")
-                self._file.close()
-            except OSError as exc:
-                self._notice(f"cannot close log file: {exc}")
-        self._file = None
-        self._stripper = None
-        self._notice("logging stopped")
+        self._guard(self._stripper.flush)
+        try:
+            self._file.write(f"--- log ended {_timestamp()} ---\n")
+            self._file.close()
+        except OSError as exc:
+            self._notice(f"cannot close log file: {exc}")
 
     def _guard(self, fn: Callable[..., object], *args: object) -> None:
         """Run a parser call so that a fault degrades logging, not the session.
@@ -360,25 +322,17 @@ class LogSession:
             self._fault(exc)
 
     def _fault(self, exc: BaseException) -> None:
-        if self._stripper is not None:
-            # Drop the partial line; on MemoryError this is what frees the memory.
-            self._stripper.line = []
-            self._stripper.col = 0
-        if self._file is not None:
-            try:
-                self._file.write(
-                    f"--- log parser error {_timestamp()}: {exc!r} "
-                    f"(output may be missing) ---\n"
-                )
-            except OSError:
-                pass
+        # Drop the partial line; on MemoryError this is what frees the memory.
+        self._stripper.line = []
+        self._stripper.col = 0
+        try:
+            self._file.write(
+                f"--- log parser error {_timestamp()}: {exc!r} "
+                f"(output may be missing) ---\n"
+            )
+        except OSError:
+            pass
         self._notice(f"parser error, log may be incomplete: {exc!r}")
-
-    def _start(self, log_file: TextIO, path: str) -> None:
-        self._file = log_file
-        self._stripper = VTStripper(log_file.write, self._include_alt_screen)
-        self.path = path
-        log_file.write(f"--- log started {_timestamp()} ---\n")
 
     def _notice(self, message: str) -> None:
         _write_stdout(self._out_fd, f"\r\n[ghostty-logger: {message}]\r\n".encode())
@@ -404,42 +358,6 @@ def _tag_prompt(env: dict[str, str]) -> None:
     env["PROMPT_COMMAND"] = f"{existing}; {guard}" if existing else guard
 
 
-def _parse_escape_key(spec: str) -> int | None:
-    if not spec:
-        return None
-    if len(spec) == 2 and spec.startswith("^"):
-        return ord(spec[1].upper()) & 0x1F
-    if len(spec) == 1:
-        return ord(spec)
-    raise ValueError(f"invalid escape key: {spec!r}")
-
-
-def _key_label(escape: int | None) -> str:
-    if escape is None:
-        return "disabled"
-    if escape < 0x20:
-        return f"Ctrl-{chr(escape + 0x40)}"
-    return chr(escape)
-
-
-def _scan_input(data: bytes, escape: int | None, pending: bool) -> tuple[bytes, int, bool]:
-    out = bytearray()
-    toggles = 0
-    for b in data:
-        if pending:
-            pending = False
-            if b == escape:
-                out.append(b)
-            else:
-                toggles += 1
-                out.append(b)
-        elif escape is not None and b == escape:
-            pending = True
-        else:
-            out.append(b)
-    return bytes(out), toggles, pending
-
-
 def _winsize(master_fd: int) -> None:
     try:
         packed = fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
@@ -458,9 +376,8 @@ def _write_stdout(fd: int, data: bytes) -> None:
         pass
 
 
-def run_session(log_path: str, log_file: TextIO, open_next: Callable[[], tuple[str, TextIO]],
-                command: list[str], include_alt_screen: bool = False,
-                escape: int | None = None) -> int:
+def run_session(log_path: str, log_file: TextIO,
+                command: list[str], include_alt_screen: bool = False) -> int:
     pid, master_fd = pty.fork()
     if pid == 0:
         env = dict(os.environ)
@@ -485,23 +402,15 @@ def run_session(log_path: str, log_file: TextIO, open_next: Callable[[], tuple[s
         saved_termios = termios.tcgetattr(stdin_fd)
         tty.setraw(stdin_fd)
 
-    session = LogSession(log_path, log_file, open_next, include_alt_screen, stdout_fd)
+    session = LogSession(log_file, include_alt_screen, stdout_fd)
     status = None
-    escape_pending = False
-    escape_deadline = 0.0
     fds = {stdin_fd, master_fd}
     try:
         while master_fd in fds and status is None:
-            timeout = _SELECT_TIMEOUT
-            if escape_pending:
-                timeout = min(timeout, max(0.0, escape_deadline - time.monotonic()))
             try:
-                ready, _, _ = select.select(sorted(fds), [], [], timeout)
+                ready, _, _ = select.select(sorted(fds), [], [], _SELECT_TIMEOUT)
             except InterruptedError:
                 continue
-            if escape_pending and stdin_fd not in ready and time.monotonic() >= escape_deadline:
-                session.toggle()
-                escape_pending = False
             for fd in ready:
                 try:
                     data = os.read(fd, 65536)
@@ -511,18 +420,10 @@ def run_session(log_path: str, log_file: TextIO, open_next: Callable[[], tuple[s
                     fds.discard(fd)
                     continue
                 if fd == stdin_fd:
-                    data, toggles, escape_pending = _scan_input(data, escape, escape_pending)
-                    for _ in range(toggles):
-                        session.toggle()
-                    if escape_pending:
-                        # A pending escape is always the last byte read, so the
-                        # window for a doubled press restarts here.
-                        escape_deadline = time.monotonic() + _ESCAPE_TIMEOUT
-                    if data:
-                        try:
-                            os.write(master_fd, data)
-                        except OSError:
-                            fds.discard(stdin_fd)
+                    try:
+                        os.write(master_fd, data)
+                    except OSError:
+                        fds.discard(stdin_fd)
                 else:
                     _write_stdout(stdout_fd, data)
                     session.feed(data)
@@ -576,11 +477,11 @@ def _ensure_log_dir(base: str) -> None:
     os.chmod(base, _LOG_DIR_MODE)
 
 
-def _open_log(output: str | None, directory: str | None, append: bool = False) -> tuple[str, TextIO]:
+def _open_log(output: str | None, directory: str | None) -> tuple[str, TextIO]:
     if output:
         # An explicit path is the caller's choice, including any symlink at it;
         # we only guarantee that a file *we* create is not world-readable.
-        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         return output, _fdopen(os.open(output, flags, _LOG_FILE_MODE))
     base = directory or os.environ.get("GHOSTTY_LOGGER_DIR") or os.path.join(
         os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
@@ -591,8 +492,6 @@ def _open_log(output: str | None, directory: str | None, append: bool = False) -
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     # This name is predictable, so refuse to write through anything already
     # sitting at it: O_EXCL rejects a planted file, O_NOFOLLOW a planted symlink.
-    # The suffix loop also stops a resume within the same second from silently
-    # truncating the segment it just wrote.
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     for suffix in ("", *(f"-{i}" for i in range(1, 100))):
         path = os.path.join(base, f"ghostty-{stamp}-{os.getpid()}{suffix}.log")
@@ -617,17 +516,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="directory for timestamped log files")
     parser.add_argument("--alt-screen", action="store_true",
                         help="also log alternate-screen (full-screen TUI) content")
-    parser.add_argument("--escape-key", default="^\\", metavar="KEY",
-                        help="key that toggles logging without exiting (default ^\\; "
-                        "press twice for a literal; empty string disables)")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="command to run instead of $SHELL")
     args = parser.parse_args(argv)
-
-    try:
-        escape = _parse_escape_key(args.escape_key)
-    except ValueError as exc:
-        parser.error(str(exc))
 
     command = args.command
     if command and command[0] == "--":
@@ -645,13 +536,11 @@ def main(argv: list[str] | None = None) -> int:
         print("ghostty-logger: warning: already inside a logged session",
               file=sys.stderr)
 
-    open_next = lambda: _open_log(args.output, args.directory, append=True)  # noqa: E731
-    label = _key_label(escape)
     print(f"ghostty-logger: logging to {log_path} "
-          f"({label} toggles logging; exit or Ctrl-D ends the session)",
+          "(exit or Ctrl-D ends the session)",
           file=sys.stderr)
     with log_file:
-        rc = run_session(log_path, log_file, open_next, command, args.alt_screen, escape)
+        rc = run_session(log_path, log_file, command, args.alt_screen)
     print(f"ghostty-logger: log saved to {log_path}", file=sys.stderr)
     return rc
 

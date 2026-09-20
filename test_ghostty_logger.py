@@ -5,7 +5,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -83,42 +82,6 @@ class VTStripperTest(unittest.TestCase):
 
     def test_8bit_c1_not_misparsed(self):
         self.assertEqual(strip(b"caf\xc3\xa9\n"), "café\n")
-
-
-class EscapeKeyTest(unittest.TestCase):
-    def test_caret_notation(self):
-        self.assertEqual(gl._parse_escape_key("^\\"), 0x1C)
-        self.assertEqual(gl._parse_escape_key("^A"), 0x01)
-
-    def test_literal_char(self):
-        self.assertEqual(gl._parse_escape_key("x"), ord("x"))
-
-    def test_empty_disables(self):
-        self.assertIsNone(gl._parse_escape_key(""))
-
-    def test_invalid_spec(self):
-        with self.assertRaises(ValueError):
-            gl._parse_escape_key("ab")
-
-
-class ScanInputTest(unittest.TestCase):
-    def test_passthrough_without_escape(self):
-        self.assertEqual(gl._scan_input(b"abc", 0x1C, False), (b"abc", 0, False))
-
-    def test_escape_toggles_and_forwards_rest(self):
-        self.assertEqual(gl._scan_input(b"\x1ca", 0x1C, False), (b"a", 1, False))
-
-    def test_doubled_escape_sends_literal(self):
-        self.assertEqual(gl._scan_input(b"\x1c\x1c", 0x1C, False), (b"\x1c", 0, False))
-
-    def test_escape_split_across_chunks(self):
-        out1, toggles1, pending = gl._scan_input(b"ab\x1c", 0x1C, False)
-        self.assertEqual((out1, toggles1, pending), (b"ab", 0, True))
-        out2, toggles2, pending = gl._scan_input(b"cd", 0x1C, pending)
-        self.assertEqual((out2, toggles2, pending), (b"cd", 1, False))
-
-    def test_disabled_escape_passes_through(self):
-        self.assertEqual(gl._scan_input(b"\x1ca", None, False), (b"\x1ca", 0, False))
 
 
 class PromptTagTest(unittest.TestCase):
@@ -408,7 +371,7 @@ class ParserFaultIsContainedTest(unittest.TestCase):
             gl.VTStripper = self.ExplodingStripper
             try:
                 with open(path, "w", encoding="utf-8", buffering=1) as f:
-                    session = gl.LogSession(path, f, lambda: (path, f), False, devnull)
+                    session = gl.LogSession(f, False, devnull)
                     session.feed(b"anything")  # must not raise
                     session.stop()
             finally:
@@ -513,78 +476,6 @@ class ProxyTest(unittest.TestCase):
         proc, content = self.run_logger("sh", "-c", 'echo "PC=$PROMPT_COMMAND"')
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertIn("[LOG] ", content)
-
-    def test_lone_escape_toggles_without_another_key(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_path = os.path.join(tmp, "lone.log")
-            proc = subprocess.Popen(
-                [sys.executable, SCRIPT, "-o", log_path, "bash", "--norc", "-i"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            assert proc.stdin is not None
-            proc.stdin.write(b"echo alpha\n")
-            proc.stdin.flush()
-            time.sleep(0.7)
-            proc.stdin.write(b"\x1c")
-            proc.stdin.flush()
-            # No further keystroke: a lone escape must pause on its own after
-            # the doubled-press window passes. Under the old deferred scan the
-            # toggle waited for the next key, so no "log ended" marker existed.
-            time.sleep(1.5)
-            with open(log_path, encoding="utf-8") as f:
-                self.assertIn("--- log ended", f.read())
-            proc.stdin.write(b"echo bravo\n")
-            proc.stdin.flush()
-            time.sleep(0.7)
-            proc.stdin.write(b"\x1c")
-            proc.stdin.flush()
-            time.sleep(1.5)
-            proc.stdin.write(b"echo charlie\nexit\n")
-            proc.stdin.flush()
-            rc = proc.wait(timeout=20)
-            proc.stdin.close()
-            with open(log_path, encoding="utf-8") as f:
-                content = f.read()
-        self.assertEqual(rc, 0)
-        self.assertIn("alpha", content)
-        self.assertNotIn("bravo", content)
-        self.assertIn("charlie", content)
-
-    def test_toggle_logging_without_exiting(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_path = os.path.join(tmp, "toggle.log")
-            proc = subprocess.Popen(
-                [sys.executable, SCRIPT, "-o", log_path, "bash", "--norc", "-i"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            assert proc.stdin is not None
-            proc.stdin.write(b"echo alpha\n")
-            proc.stdin.flush()
-            time.sleep(0.7)
-            proc.stdin.write(b"\x1c")
-            proc.stdin.flush()
-            time.sleep(0.3)
-            proc.stdin.write(b"echo bravo\n")
-            proc.stdin.flush()
-            time.sleep(0.7)
-            proc.stdin.write(b"\x1c")
-            proc.stdin.flush()
-            time.sleep(0.3)
-            proc.stdin.write(b"echo charlie\nexit\n")
-            proc.stdin.flush()
-            rc = proc.wait(timeout=20)
-            with open(log_path, encoding="utf-8") as f:
-                content = f.read()
-        self.assertEqual(rc, 0)
-        self.assertIn("alpha", content)
-        self.assertNotIn("bravo", content)
-        self.assertIn("charlie", content)
-        self.assertEqual(content.count("--- log started"), 2)
-        self.assertEqual(content.count("--- log ended"), 2)
 
 
 if __name__ == "__main__":

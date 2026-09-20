@@ -11,13 +11,7 @@ provides the same behavior as a zero-dependency pty wrapper that works with
 stock Ghostty:
 
 - **Start logging:** run `ghostty-logger` (optionally bound to a Ghostty keybind).
-- **Pause/resume logging:** press `Ctrl-\` to stop logging and keep working in
-  the same shell; press it again to resume into a new log segment. Press
-  `Ctrl-\` twice to send a literal `Ctrl-\` to the shell (a single press takes
-  effect after a ~0.3 s pause that distinguishes it from a doubled press).
-  Change or disable the key with `--escape-key` (e.g. `--escape-key ^]` or
-  `--escape-key ''`).
-- **Stop entirely:** `exit` or Ctrl-D ends the session. The log is flushed
+- **Stop:** `exit` or Ctrl-D ends the session. The log is flushed
   and closed, and the shell's exit code is propagated.
 - **Log content:** exactly what the terminal displays, converted to plain
   text: colors, titles, and control sequences are stripped; carriage returns,
@@ -64,10 +58,6 @@ free suffix rather than writing through it. An explicit `-o PATH` is treated
 as your choice, symlink and all; only files the logger creates get `0600`, so
 an existing file at that path keeps its current permissions.
 
-With the default timestamped naming, each resume starts a fresh log file.
-With `-o PATH`, resumed segments append to the same file, delimited by new
-`--- log started/ended <timestamp> ---` markers.
-
 ## Ghostty keybind
 
 Add to `~/.config/ghostty/config` (see `examples/ghostty-config`):
@@ -77,15 +67,13 @@ keybind = ctrl+shift+l=text:ghostty-logger\n
 ```
 
 Ghostty's `text` binding types the command into the focused terminal, giving
-a one-keystroke "Start Logger". Stop with Ctrl-\ (session continues) or
-Ctrl-D (session ends).
+a one-keystroke "Start Logger". End the session with `exit` or Ctrl-D.
 
 ## Recording indicator in your prompt
 
 The logger tags the prompt of the logged shell itself: `[LOG] ` is prepended
 to an exported `PS1`, and bash additionally gets a `PROMPT_COMMAND` guard
-that re-applies the tag if your rc files rebuild `PS1`. The tag reflects the
-session, not the pause state: it stays while a `Ctrl-\` pause is in effect.
+that re-applies the tag if your rc files rebuild `PS1`.
 
 The logged shell also gets `GHOSTTY_LOGGER=<log path>` in its environment, so
 shells that ignore an inherited prompt (zsh, fish) can tag themselves from
@@ -94,9 +82,6 @@ their rc file instead:
 ```sh
 [ -n "$GHOSTTY_LOGGER" ] && PS1="[LOG] $PS1"
 ```
-
-Note: the variable reflects the first log path of the session; if you resume
-logging after a Ctrl-\ pause, subsequent segments use new paths.
 
 ## Limitations vs. Terminator's Logger
 
