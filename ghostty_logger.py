@@ -18,6 +18,7 @@ import signal
 import struct
 import sys
 import termios
+import time
 import tty
 from collections.abc import Callable
 from typing import TextIO
@@ -42,6 +43,12 @@ _MAX_CSI_PARAM_COUNT = 24
 # We match that rather than resuming on length: resuming would log bytes the
 # terminal never displayed. We only note the anomaly so it is not invisible.
 _STRING_WARN_LEN = 2048
+
+# A lone escape key toggles logging; a doubled press sends a literal. The two
+# are told apart by this much silence after the first press, so a single
+# Ctrl-\ takes effect on its own instead of waiting for the next keystroke.
+_ESCAPE_TIMEOUT = 0.3
+_SELECT_TIMEOUT = 0.5
 
 
 class VTStripper:
@@ -377,6 +384,26 @@ class LogSession:
         _write_stdout(self._out_fd, f"\r\n[ghostty-logger: {message}]\r\n".encode())
 
 
+_LOG_PROMPT_TAG = "[LOG] "
+
+
+def _tag_prompt(env: dict[str, str]) -> None:
+    """Mark the child's prompt as recorded where the shell allows it.
+
+    sh and bash honor an inherited PS1; bash also runs an inherited
+    PROMPT_COMMAND before every prompt, which re-applies the tag after an rc
+    file rebuilds PS1. zsh ignores both and still needs the rc snippet from
+    the README.
+    """
+    ps1 = env.get("PS1", "")
+    if ps1 and not ps1.startswith(_LOG_PROMPT_TAG):
+        env["PS1"] = _LOG_PROMPT_TAG + ps1
+    guard = (f'case $PS1 in "{_LOG_PROMPT_TAG}"*) ;; '
+             f'*) PS1="{_LOG_PROMPT_TAG}$PS1" ;; esac')
+    existing = env.get("PROMPT_COMMAND", "").rstrip("; \t\n")
+    env["PROMPT_COMMAND"] = f"{existing}; {guard}" if existing else guard
+
+
 def _parse_escape_key(spec: str) -> int | None:
     if not spec:
         return None
@@ -438,6 +465,7 @@ def run_session(log_path: str, log_file: TextIO, open_next: Callable[[], tuple[s
     if pid == 0:
         env = dict(os.environ)
         env["GHOSTTY_LOGGER"] = log_path
+        _tag_prompt(env)
         try:
             os.execvpe(command[0], command, env)
         except BaseException as exc:  # noqa: BLE001 - must never return to caller
@@ -460,13 +488,20 @@ def run_session(log_path: str, log_file: TextIO, open_next: Callable[[], tuple[s
     session = LogSession(log_path, log_file, open_next, include_alt_screen, stdout_fd)
     status = None
     escape_pending = False
+    escape_deadline = 0.0
     fds = {stdin_fd, master_fd}
     try:
         while master_fd in fds and status is None:
+            timeout = _SELECT_TIMEOUT
+            if escape_pending:
+                timeout = min(timeout, max(0.0, escape_deadline - time.monotonic()))
             try:
-                ready, _, _ = select.select(sorted(fds), [], [], 0.5)
+                ready, _, _ = select.select(sorted(fds), [], [], timeout)
             except InterruptedError:
                 continue
+            if escape_pending and stdin_fd not in ready and time.monotonic() >= escape_deadline:
+                session.toggle()
+                escape_pending = False
             for fd in ready:
                 try:
                     data = os.read(fd, 65536)
@@ -479,6 +514,10 @@ def run_session(log_path: str, log_file: TextIO, open_next: Callable[[], tuple[s
                     data, toggles, escape_pending = _scan_input(data, escape, escape_pending)
                     for _ in range(toggles):
                         session.toggle()
+                    if escape_pending:
+                        # A pending escape is always the last byte read, so the
+                        # window for a doubled press restarts here.
+                        escape_deadline = time.monotonic() + _ESCAPE_TIMEOUT
                     if data:
                         try:
                             os.write(master_fd, data)

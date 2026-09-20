@@ -121,6 +121,33 @@ class ScanInputTest(unittest.TestCase):
         self.assertEqual(gl._scan_input(b"\x1ca", None, False), (b"\x1ca", 0, False))
 
 
+class PromptTagTest(unittest.TestCase):
+    def test_prepends_exported_ps1(self):
+        env = {"PS1": "$ "}
+        gl._tag_prompt(env)
+        self.assertEqual(env["PS1"], "[LOG] $ ")
+
+    def test_ps1_not_doubled(self):
+        env = {"PS1": "[LOG] $ "}
+        gl._tag_prompt(env)
+        self.assertEqual(env["PS1"], "[LOG] $ ")
+
+    def test_no_exported_ps1_left_unset(self):
+        env = {}
+        gl._tag_prompt(env)
+        self.assertNotIn("PS1", env)
+
+    def test_prompt_command_reapplies_tag(self):
+        env = {}
+        gl._tag_prompt(env)
+        self.assertIn('[LOG] ', env["PROMPT_COMMAND"])
+
+    def test_existing_prompt_command_preserved(self):
+        env = {"PROMPT_COMMAND": "history -a;"}
+        gl._tag_prompt(env)
+        self.assertTrue(env["PROMPT_COMMAND"].startswith("history -a; "))
+
+
 class UntrustedSequenceLimitsTest(unittest.TestCase):
     """Cursor columns come from untrusted output and must stay bounded.
 
@@ -481,6 +508,49 @@ class ProxyTest(unittest.TestCase):
         # on a real terminal too - but the log says so rather than ending as
         # though nothing were missing.
         self.assertIn("unterminated string sequence", content)
+
+    def test_prompt_command_env_visible_to_child(self):
+        proc, content = self.run_logger("sh", "-c", 'echo "PC=$PROMPT_COMMAND"')
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertIn("[LOG] ", content)
+
+    def test_lone_escape_toggles_without_another_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "lone.log")
+            proc = subprocess.Popen(
+                [sys.executable, SCRIPT, "-o", log_path, "bash", "--norc", "-i"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            assert proc.stdin is not None
+            proc.stdin.write(b"echo alpha\n")
+            proc.stdin.flush()
+            time.sleep(0.7)
+            proc.stdin.write(b"\x1c")
+            proc.stdin.flush()
+            # No further keystroke: a lone escape must pause on its own after
+            # the doubled-press window passes. Under the old deferred scan the
+            # toggle waited for the next key, so no "log ended" marker existed.
+            time.sleep(1.5)
+            with open(log_path, encoding="utf-8") as f:
+                self.assertIn("--- log ended", f.read())
+            proc.stdin.write(b"echo bravo\n")
+            proc.stdin.flush()
+            time.sleep(0.7)
+            proc.stdin.write(b"\x1c")
+            proc.stdin.flush()
+            time.sleep(1.5)
+            proc.stdin.write(b"echo charlie\nexit\n")
+            proc.stdin.flush()
+            rc = proc.wait(timeout=20)
+            proc.stdin.close()
+            with open(log_path, encoding="utf-8") as f:
+                content = f.read()
+        self.assertEqual(rc, 0)
+        self.assertIn("alpha", content)
+        self.assertNotIn("bravo", content)
+        self.assertIn("charlie", content)
 
     def test_toggle_logging_without_exiting(self):
         with tempfile.TemporaryDirectory() as tmp:

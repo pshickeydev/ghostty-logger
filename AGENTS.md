@@ -43,14 +43,17 @@ poke at `VTStripper` internals):
 
 1. `main()` - CLI parsing, log path resolution, process exit code.
 2. `run_session()` - pty lifecycle: `pty.fork()`, raw stdin, the `select`
-   loop, escape-key scanning (`_scan_input`), child exit-code propagation.
+   loop, escape-key scanning (`_scan_input` plus the lone-press deadline that
+   fires a toggle without waiting for the next keystroke), child exit-code
+   propagation.
 3. `LogSession` - owns the log file and parser; start/stop/restart on toggle;
    `_guard()` contains parser faults so they degrade logging instead of
    killing the user's shell.
 4. `VTStripper` - incremental VT parser that consumes untrusted terminal
    output and emits rendered plain text via a callback.
 5. Helpers - `_open_log` (secure log file creation), `_winsize`,
-   `_parse_escape_key`, `_timestamp`, etc.
+   `_parse_escape_key`, `_tag_prompt` (prompt recording indicator),
+   `_timestamp`, etc.
 
 ## Code style
 

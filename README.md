@@ -13,8 +13,10 @@ stock Ghostty:
 - **Start logging:** run `ghostty-logger` (optionally bound to a Ghostty keybind).
 - **Pause/resume logging:** press `Ctrl-\` to stop logging and keep working in
   the same shell; press it again to resume into a new log segment. Press
-  `Ctrl-\` twice to send a literal `Ctrl-\` to the shell. Change or disable
-  the key with `--escape-key` (e.g. `--escape-key ^]` or `--escape-key ''`).
+  `Ctrl-\` twice to send a literal `Ctrl-\` to the shell (a single press takes
+  effect after a ~0.3 s pause that distinguishes it from a doubled press).
+  Change or disable the key with `--escape-key` (e.g. `--escape-key ^]` or
+  `--escape-key ''`).
 - **Stop entirely:** `exit` or Ctrl-D ends the session. The log is flushed
   and closed, and the shell's exit code is propagated.
 - **Log content:** exactly what the terminal displays, converted to plain
@@ -80,8 +82,14 @@ Ctrl-D (session ends).
 
 ## Recording indicator in your prompt
 
-The logged shell gets `GHOSTTY_LOGGER=<log path>` in its environment, so your
-prompt can show when recording is active. Example for bash/zsh:
+The logger tags the prompt of the logged shell itself: `[LOG] ` is prepended
+to an exported `PS1`, and bash additionally gets a `PROMPT_COMMAND` guard
+that re-applies the tag if your rc files rebuild `PS1`. The tag reflects the
+session, not the pause state: it stays while a `Ctrl-\` pause is in effect.
+
+The logged shell also gets `GHOSTTY_LOGGER=<log path>` in its environment, so
+shells that ignore an inherited prompt (zsh, fish) can tag themselves from
+their rc file instead:
 
 ```sh
 [ -n "$GHOSTTY_LOGGER" ] && PS1="[LOG] $PS1"
