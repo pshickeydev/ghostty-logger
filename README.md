@@ -129,6 +129,8 @@ one, ship the lines somewhere the session cannot reach.
 
 ## Development
 
+Contributor and agent conventions live in [AGENTS.md](AGENTS.md).
+
 ```sh
 python3 -m unittest test_ghostty_logger -v
 ```
