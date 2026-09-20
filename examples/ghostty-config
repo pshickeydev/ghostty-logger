@@ -1,0 +1,5 @@
+# Append to ~/.config/ghostty/config
+
+# "Start Logger": type `ghostty-logger` into the focused terminal.
+# Inside a logged session: Ctrl-\ pauses/resumes logging; Ctrl-D ends it.
+keybind = ctrl+shift+l=text:ghostty-logger\n
